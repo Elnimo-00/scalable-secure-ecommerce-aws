@@ -1,0 +1,184 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >
+  Security tier - the customer-managed KMS key, the database secret, every
+  security group, and the WAF web ACL. Keeping all security groups in one stack
+  avoids circular references between the data and compute tiers. Deploy after
+  the network stack.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: enpm818n-grp21
+
+Resources:
+  # Customer-managed key used for RDS, EBS, S3, secrets and log encryption.
+  WorkloadKey:
+    Type: "AWS::KMS::Key"
+    Properties:
+      Description: !Sub "${ProjectName} workload encryption key"
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AccountRoot
+            Effect: Allow
+            Principal: { AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root" }
+            Action: "kms:*"
+            Resource: "*"
+
+  WorkloadKeyAlias:
+    Type: "AWS::KMS::Alias"
+    Properties:
+      AliasName: !Sub "alias/${ProjectName}"
+      TargetKeyId: !Ref WorkloadKey
+
+  # Generated database credentials - never written into a template or user-data.
+  DatabaseSecret:
+    Type: "AWS::SecretsManager::Secret"
+    Properties:
+      Name: !Sub "${ProjectName}/database"
+      Description: RDS MySQL master credentials
+      KmsKeyId: !Ref WorkloadKey
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "admin"}'
+        GenerateStringKey: password
+        PasswordLength: 32
+        ExcludeCharacters: '"@/\'
+
+  # -- Security groups ----------------------------------------------------
+  AlbSecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      VpcId:
+        Fn::ImportValue: !Sub "${ProjectName}-VpcId"
+      GroupDescription: Public edge - HTTP and HTTPS from the internet
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: "0.0.0.0/0", Description: HTTPS }
+        - { IpProtocol: tcp, FromPort: 80,  ToPort: 80,  CidrIp: "0.0.0.0/0", Description: "HTTP (redirected to 443)" }
+      SecurityGroupEgress:
+        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: "172.31.0.0/16", Description: "App tier" }
+      Tags: [{ Key: Name, Value: !Sub "${ProjectName}-alb-sg" }]
+
+  AppSecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      VpcId:
+        Fn::ImportValue: !Sub "${ProjectName}-VpcId"
+      GroupDescription: App servers - only from the load balancer and bastion
+      SecurityGroupEgress:
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: "0.0.0.0/0", Description: "Updates and AWS APIs over TLS" }
+        - { IpProtocol: tcp, FromPort: 3306, ToPort: 3306, CidrIp: "172.31.20.0/23", Description: "Database tier" }
+      Tags: [{ Key: Name, Value: !Sub "${ProjectName}-app-sg" }]
+
+  AppIngressFromAlb:
+    Type: "AWS::EC2::SecurityGroupIngress"
+    Properties:
+      GroupId: !Ref AppSecurityGroup
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      SourceSecurityGroupId: !Ref AlbSecurityGroup
+      Description: HTTP from the load balancer only
+
+  AppIngressFromBastion:
+    Type: "AWS::EC2::SecurityGroupIngress"
+    Properties:
+      GroupId: !Ref AppSecurityGroup
+      IpProtocol: tcp
+      FromPort: 22
+      ToPort: 22
+      SourceSecurityGroupId: !Ref BastionSecurityGroup
+      Description: SSH from the bastion only
+
+  BastionSecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      VpcId:
+        Fn::ImportValue: !Sub "${ProjectName}-VpcId"
+      GroupDescription: Bastion - SSH from an approved admin range only
+      SecurityGroupEgress:
+        - { IpProtocol: tcp, FromPort: 22, ToPort: 22, CidrIp: "172.31.0.0/16", Description: "SSH into the VPC" }
+      Tags: [{ Key: Name, Value: !Sub "${ProjectName}-bastion-sg" }]
+
+  DatabaseSecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      VpcId:
+        Fn::ImportValue: !Sub "${ProjectName}-VpcId"
+      GroupDescription: MySQL - only from the app tier
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref AppSecurityGroup
+          Description: MySQL from the app tier only
+      SecurityGroupEgress:
+        - { IpProtocol: tcp, FromPort: 1, ToPort: 1, CidrIp: "127.0.0.1/32", Description: "No egress" }
+      Tags: [{ Key: Name, Value: !Sub "${ProjectName}-db-sg" }]
+
+  # -- WAF: the managed rule groups from the report -----------------------
+  WebAcl:
+    Type: "AWS::WAFv2::WebACL"
+    Properties:
+      Name: !Sub "${ProjectName}-waf"
+      Scope: REGIONAL
+      DefaultAction: { Allow: {} }
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: !Sub "${ProjectName}-waf"
+      Rules:
+        - Name: AmazonIpReputationList
+          Priority: 0
+          OverrideAction: { None: {} }
+          Statement:
+            ManagedRuleGroupStatement: { VendorName: AWS, Name: AWSManagedRulesAmazonIpReputationList }
+          VisibilityConfig: { SampledRequestsEnabled: true, CloudWatchMetricsEnabled: true, MetricName: ip-reputation }
+        - Name: CommonRuleSet
+          Priority: 1
+          OverrideAction: { None: {} }
+          Statement:
+            ManagedRuleGroupStatement: { VendorName: AWS, Name: AWSManagedRulesCommonRuleSet }
+          VisibilityConfig: { SampledRequestsEnabled: true, CloudWatchMetricsEnabled: true, MetricName: common }
+        - Name: KnownBadInputs
+          Priority: 2
+          OverrideAction: { None: {} }
+          Statement:
+            ManagedRuleGroupStatement: { VendorName: AWS, Name: AWSManagedRulesKnownBadInputsRuleSet }
+          VisibilityConfig: { SampledRequestsEnabled: true, CloudWatchMetricsEnabled: true, MetricName: bad-inputs }
+        - Name: SQLiRuleSet
+          Priority: 3
+          OverrideAction: { None: {} }
+          Statement:
+            ManagedRuleGroupStatement: { VendorName: AWS, Name: AWSManagedRulesSQLiRuleSet }
+          VisibilityConfig: { SampledRequestsEnabled: true, CloudWatchMetricsEnabled: true, MetricName: sqli }
+        - Name: PHPRuleSet
+          Priority: 4
+          OverrideAction: { None: {} }
+          Statement:
+            ManagedRuleGroupStatement: { VendorName: AWS, Name: AWSManagedRulesPHPRuleSet }
+          VisibilityConfig: { SampledRequestsEnabled: true, CloudWatchMetricsEnabled: true, MetricName: php }
+
+Outputs:
+  WorkloadKeyArn:
+    Value: !GetAtt WorkloadKey.Arn
+    Export: { Name: !Sub "${ProjectName}-WorkloadKeyArn" }
+  DatabaseSecretArn:
+    Value: !Ref DatabaseSecret
+    Export: { Name: !Sub "${ProjectName}-DatabaseSecretArn" }
+  AlbSecurityGroupId:
+    Value: !Ref AlbSecurityGroup
+    Export: { Name: !Sub "${ProjectName}-AlbSecurityGroupId" }
+  AppSecurityGroupId:
+    Value: !Ref AppSecurityGroup
+    Export: { Name: !Sub "${ProjectName}-AppSecurityGroupId" }
+  BastionSecurityGroupId:
+    Value: !Ref BastionSecurityGroup
+    Export: { Name: !Sub "${ProjectName}-BastionSecurityGroupId" }
+  DatabaseSecurityGroupId:
+    Value: !Ref DatabaseSecurityGroup
+    Export: { Name: !Sub "${ProjectName}-DatabaseSecurityGroupId" }
+  WebAclArn:
+    Value: !GetAtt WebAcl.Arn
+    Export: { Name: !Sub "${ProjectName}-WebAclArn" }

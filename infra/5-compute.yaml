@@ -1,0 +1,170 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >
+  Compute tier — a least-privilege instance role, a launch template that boots
+  the e-commerce web server, an Auto Scaling group spread across two AZs behind
+  the load balancer with a target-tracking policy on CPU, and a bastion host.
+  Matches the report: min 1, max 3, target 50% CPU, 300s warm-up. Deploy after
+  the edge stack.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: enpm818n-grp21
+  InstanceType:
+    Type: String
+    Default: t3.micro
+  BastionInstanceType:
+    Type: String
+    Default: t3.micro
+  AdminCidr:
+    Type: String
+    Default: "0.0.0.0/0"
+    Description: CIDR allowed to SSH to the bastion. Narrow this to your office/VPN.
+  UbuntuAmiId:
+    Type: "AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>"
+    Default: "/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id"
+
+Resources:
+  InstanceRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: "sts:AssumeRole"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+      Policies:
+        - PolicyName: read-db-secret
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ["secretsmanager:GetSecretValue"]
+                Resource:
+                  Fn::ImportValue: !Sub "${ProjectName}-DatabaseSecretArn"
+              - Effect: Allow
+                Action: ["kms:Decrypt"]
+                Resource:
+                  Fn::ImportValue: !Sub "${ProjectName}-WorkloadKeyArn"
+                Condition:
+                  StringEquals:
+                    "kms:ViaService": !Sub "secretsmanager.${AWS::Region}.amazonaws.com"
+
+  InstanceProfile:
+    Type: "AWS::IAM::InstanceProfile"
+    Properties:
+      Roles: [!Ref InstanceRole]
+
+  LaunchTemplate:
+    Type: "AWS::EC2::LaunchTemplate"
+    Properties:
+      LaunchTemplateName: !Sub "${ProjectName}-asglt"
+      LaunchTemplateData:
+        ImageId: !Ref UbuntuAmiId
+        InstanceType: !Ref InstanceType
+        IamInstanceProfile: { Arn: !GetAtt InstanceProfile.Arn }
+        SecurityGroupIds:
+          - Fn::ImportValue: !Sub "${ProjectName}-AppSecurityGroupId"
+        MetadataOptions:
+          HttpTokens: required
+          HttpPutResponseHopLimit: 1
+        BlockDeviceMappings:
+          - DeviceName: /dev/sda1
+            Ebs: { VolumeSize: 20, VolumeType: gp3, Encrypted: true, DeleteOnTermination: true }
+        Monitoring: { Enabled: true }
+        TagSpecifications:
+          - ResourceType: instance
+            Tags: [{ Key: Name, Value: !Sub "${ProjectName}-app" }]
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            set -euo pipefail
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -y
+            apt-get install -y apache2 php libapache2-mod-php php-mysql awscli jq
+            # The e-commerce app is served from /var/www/html.
+            DB_HOST="$(aws ssm get-parameter --name /${ProjectName}/db-endpoint \
+              --query Parameter.Value --output text 2>/dev/null || echo localhost)"
+            SECRET="$(aws secretsmanager get-secret-value \
+              --secret-id ${ProjectName}/database --region ${AWS::Region} \
+              --query SecretString --output text)"
+            install -o www-data -g www-data -m 640 /dev/null /var/www/html/.env
+            {
+              echo "DB_HOST=$DB_HOST"
+              echo "DB_USER=$(echo "$SECRET" | jq -r .username)"
+              echo "DB_PASS=$(echo "$SECRET" | jq -r .password)"
+            } > /var/www/html/.env
+            unset SECRET
+            echo "ok" > /var/www/html/index.html
+            systemctl enable --now apache2
+
+  AutoScalingGroup:
+    Type: "AWS::AutoScaling::AutoScalingGroup"
+    Properties:
+      AutoScalingGroupName: !Sub "${ProjectName}-asg"
+      MinSize: "1"
+      MaxSize: "3"
+      DesiredCapacity: "2"
+      VPCZoneIdentifier:
+        - Fn::ImportValue: !Sub "${ProjectName}-AppSubnetA"
+        - Fn::ImportValue: !Sub "${ProjectName}-AppSubnetB"
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      TargetGroupARNs:
+        - Fn::ImportValue: !Sub "${ProjectName}-TargetGroupArn"
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 300
+      Tags:
+        - { Key: Name, Value: !Sub "${ProjectName}-app", PropagateAtLaunch: true }
+
+  # Report's policy: keep average CPU at 50%, 300s warm-up before counting.
+  CpuTargetTracking:
+    Type: "AWS::AutoScaling::ScalingPolicy"
+    Properties:
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      PolicyType: TargetTrackingScaling
+      EstimatedInstanceWarmup: 300
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification: { PredefinedMetricType: ASGAverageCPUUtilization }
+        TargetValue: 50.0
+
+  BastionHost:
+    Type: "AWS::EC2::Instance"
+    Properties:
+      ImageId: !Ref UbuntuAmiId
+      InstanceType: !Ref BastionInstanceType
+      IamInstanceProfile: !Ref InstanceProfile
+      SubnetId:
+        Fn::ImportValue: !Sub "${ProjectName}-PublicSubnetA"
+      SecurityGroupIds:
+        - Fn::ImportValue: !Sub "${ProjectName}-BastionSecurityGroupId"
+      MetadataOptions:
+        HttpTokens: required
+        HttpPutResponseHopLimit: 2
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs: { VolumeSize: 8, VolumeType: gp3, Encrypted: true, DeleteOnTermination: true }
+      Tags: [{ Key: Name, Value: !Sub "${ProjectName}-bastion" }]
+
+  # Bastion SSH is opened here so the operator CIDR stays with the compute stack.
+  BastionSshIngress:
+    Type: "AWS::EC2::SecurityGroupIngress"
+    Properties:
+      GroupId:
+        Fn::ImportValue: !Sub "${ProjectName}-BastionSecurityGroupId"
+      IpProtocol: tcp
+      FromPort: 22
+      ToPort: 22
+      CidrIp: !Ref AdminCidr
+      Description: SSH to the bastion from the admin range
+
+Outputs:
+  AutoScalingGroupName:
+    Value: !Ref AutoScalingGroup
+    Export: { Name: !Sub "${ProjectName}-AutoScalingGroupName" }

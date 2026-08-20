@@ -1,0 +1,146 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >
+  Observability tier — a multi-region CloudTrail to an encrypted, access-blocked
+  S3 bucket, a CloudWatch dashboard over the scaling and database metrics, and
+  alarms for load-balancer 5xx errors and database CPU. Deploy last.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: enpm818n-grp21
+  AlertEmail:
+    Type: String
+    Default: ""
+    Description: Optional email for alarm notifications. Leave blank to skip.
+
+Conditions:
+  HasEmail: !Not [!Equals [!Ref AlertEmail, ""]]
+
+Resources:
+  TrailBucket:
+    Type: "AWS::S3::Bucket"
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub "${ProjectName}-cloudtrail-${AWS::AccountId}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      LifecycleConfiguration:
+        Rules:
+          - { Id: expire, Status: Enabled, ExpirationInDays: 365 }
+
+  TrailBucketPolicy:
+    Type: "AWS::S3::BucketPolicy"
+    Properties:
+      Bucket: !Ref TrailBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AWSCloudTrailAclCheck
+            Effect: Allow
+            Principal: { Service: cloudtrail.amazonaws.com }
+            Action: "s3:GetBucketAcl"
+            Resource: !GetAtt TrailBucket.Arn
+          - Sid: AWSCloudTrailWrite
+            Effect: Allow
+            Principal: { Service: cloudtrail.amazonaws.com }
+            Action: "s3:PutObject"
+            Resource: !Sub "${TrailBucket.Arn}/AWSLogs/${AWS::AccountId}/*"
+            Condition:
+              StringEquals: { "s3:x-amz-acl": bucket-owner-full-control }
+
+  Trail:
+    Type: "AWS::CloudTrail::Trail"
+    DependsOn: TrailBucketPolicy
+    Properties:
+      TrailName: !Sub "${ProjectName}-trail"
+      S3BucketName: !Ref TrailBucket
+      IsLogging: true
+      IsMultiRegionTrail: true
+      IncludeGlobalServiceEvents: true
+      EnableLogFileValidation: true
+
+  AlertTopic:
+    Type: "AWS::SNS::Topic"
+    Properties:
+      TopicName: !Sub "${ProjectName}-alerts"
+
+  AlertSubscription:
+    Type: "AWS::SNS::Subscription"
+    Condition: HasEmail
+    Properties:
+      TopicArn: !Ref AlertTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+
+  Alb5xxAlarm:
+    Type: "AWS::CloudWatch::Alarm"
+    Properties:
+      AlarmName: !Sub "${ProjectName}-alb-5xx"
+      AlarmDescription: Target 5xx responses are elevated
+      Namespace: AWS/ApplicationELB
+      MetricName: HTTPCode_Target_5XX_Count
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 10
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+
+  RdsCpuAlarm:
+    Type: "AWS::CloudWatch::Alarm"
+    Properties:
+      AlarmName: !Sub "${ProjectName}-rds-cpu"
+      AlarmDescription: Database CPU is sustained high
+      Namespace: AWS/RDS
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Sub "${ProjectName}-db"
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 3
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+
+  Dashboard:
+    Type: "AWS::CloudWatch::Dashboard"
+    Properties:
+      DashboardName: !Sub "${ProjectName}-dashboard"
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric", "x": 0, "y": 0, "width": 12, "height": 6,
+              "properties": {
+                "title": "Auto Scaling group size",
+                "region": "${AWS::Region}",
+                "metrics": [
+                  [ "AWS/AutoScaling", "GroupTotalInstances", "AutoScalingGroupName", "${ProjectName}-asg" ],
+                  [ "AWS/AutoScaling", "GroupInServiceInstances", "AutoScalingGroupName", "${ProjectName}-asg" ]
+                ]
+              }
+            },
+            {
+              "type": "metric", "x": 12, "y": 0, "width": 12, "height": 6,
+              "properties": {
+                "title": "Database CPU and connections",
+                "region": "${AWS::Region}",
+                "metrics": [
+                  [ "AWS/RDS", "CPUUtilization", "DBInstanceIdentifier", "${ProjectName}-db" ],
+                  [ "AWS/RDS", "DatabaseConnections", "DBInstanceIdentifier", "${ProjectName}-db" ]
+                ]
+              }
+            }
+          ]
+        }

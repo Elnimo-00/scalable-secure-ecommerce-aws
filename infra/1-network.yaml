@@ -1,0 +1,214 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >
+  Network tier for the ENPM818N Group 21 e-commerce platform — a three-tier VPC
+  across two Availability Zones. Public subnets hold the load balancer and
+  bastion; the app subnets hold the Auto Scaling group; the data subnets hold
+  RDS and have no route off the VPC. Deploy first; the other stacks import its
+  exports. Reconstructed from the architecture in report.pdf.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: enpm818n-grp21
+    Description: Prefix for resource names and cross-stack export names.
+  VpcCidr:
+    Type: String
+    Default: "172.31.0.0/16"
+
+Resources:
+  Vpc:
+    Type: "AWS::EC2::VPC"
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - { Key: Name, Value: !Sub "${ProjectName}-vpc" }
+        - { Key: Project, Value: !Ref ProjectName }
+
+  InternetGateway:
+    Type: "AWS::EC2::InternetGateway"
+    Properties:
+      Tags:
+        - { Key: Name, Value: !Sub "${ProjectName}-igw" }
+
+  GatewayAttachment:
+    Type: "AWS::EC2::VPCGatewayAttachment"
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  # -- Subnets: public / app / data, one per AZ ---------------------------
+  PublicSubnetA:
+    Type: "AWS::EC2::Subnet"
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: "172.31.0.0/24"
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags: [{ Key: Name, Value: !Sub "${ProjectName}-public-a" }]
+
+  PublicSubnetB:
+    Type: "AWS::EC2::Subnet"
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: "172.31.1.0/24"
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags: [{ Key: Name, Value: !Sub "${ProjectName}-public-b" }]
+
+  AppSubnetA:
+    Type: "AWS::EC2::Subnet"
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: "172.31.10.0/24"
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags: [{ Key: Name, Value: !Sub "${ProjectName}-app-a" }]
+
+  AppSubnetB:
+    Type: "AWS::EC2::Subnet"
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: "172.31.11.0/24"
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      Tags: [{ Key: Name, Value: !Sub "${ProjectName}-app-b" }]
+
+  DataSubnetA:
+    Type: "AWS::EC2::Subnet"
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: "172.31.20.0/24"
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags: [{ Key: Name, Value: !Sub "${ProjectName}-data-a" }]
+
+  DataSubnetB:
+    Type: "AWS::EC2::Subnet"
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: "172.31.21.0/24"
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      Tags: [{ Key: Name, Value: !Sub "${ProjectName}-data-b" }]
+
+  # -- NAT, one per AZ so losing an AZ does not lose egress ---------------
+  NatEipA:
+    Type: "AWS::EC2::EIP"
+    DependsOn: GatewayAttachment
+    Properties: { Domain: vpc }
+
+  NatEipB:
+    Type: "AWS::EC2::EIP"
+    DependsOn: GatewayAttachment
+    Properties: { Domain: vpc }
+
+  NatGatewayA:
+    Type: "AWS::EC2::NatGateway"
+    Properties:
+      AllocationId: !GetAtt NatEipA.AllocationId
+      SubnetId: !Ref PublicSubnetA
+      Tags: [{ Key: Name, Value: !Sub "${ProjectName}-nat-a" }]
+
+  NatGatewayB:
+    Type: "AWS::EC2::NatGateway"
+    Properties:
+      AllocationId: !GetAtt NatEipB.AllocationId
+      SubnetId: !Ref PublicSubnetB
+      Tags: [{ Key: Name, Value: !Sub "${ProjectName}-nat-b" }]
+
+  # -- Routing ------------------------------------------------------------
+  PublicRouteTable:
+    Type: "AWS::EC2::RouteTable"
+    Properties:
+      VpcId: !Ref Vpc
+      Tags: [{ Key: Name, Value: !Sub "${ProjectName}-public-rt" }]
+
+  PublicDefaultRoute:
+    Type: "AWS::EC2::Route"
+    DependsOn: GatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: "0.0.0.0/0"
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetARouteAssoc:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties: { SubnetId: !Ref PublicSubnetA, RouteTableId: !Ref PublicRouteTable }
+
+  PublicSubnetBRouteAssoc:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties: { SubnetId: !Ref PublicSubnetB, RouteTableId: !Ref PublicRouteTable }
+
+  AppRouteTableA:
+    Type: "AWS::EC2::RouteTable"
+    Properties:
+      VpcId: !Ref Vpc
+      Tags: [{ Key: Name, Value: !Sub "${ProjectName}-app-rt-a" }]
+
+  AppDefaultRouteA:
+    Type: "AWS::EC2::Route"
+    Properties:
+      RouteTableId: !Ref AppRouteTableA
+      DestinationCidrBlock: "0.0.0.0/0"
+      NatGatewayId: !Ref NatGatewayA
+
+  AppSubnetARouteAssoc:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties: { SubnetId: !Ref AppSubnetA, RouteTableId: !Ref AppRouteTableA }
+
+  AppRouteTableB:
+    Type: "AWS::EC2::RouteTable"
+    Properties:
+      VpcId: !Ref Vpc
+      Tags: [{ Key: Name, Value: !Sub "${ProjectName}-app-rt-b" }]
+
+  AppDefaultRouteB:
+    Type: "AWS::EC2::Route"
+    Properties:
+      RouteTableId: !Ref AppRouteTableB
+      DestinationCidrBlock: "0.0.0.0/0"
+      NatGatewayId: !Ref NatGatewayB
+
+  AppSubnetBRouteAssoc:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties: { SubnetId: !Ref AppSubnetB, RouteTableId: !Ref AppRouteTableB }
+
+  # Data tier has no route off the VPC.
+  DataRouteTable:
+    Type: "AWS::EC2::RouteTable"
+    Properties:
+      VpcId: !Ref Vpc
+      Tags: [{ Key: Name, Value: !Sub "${ProjectName}-data-rt" }]
+
+  DataSubnetARouteAssoc:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties: { SubnetId: !Ref DataSubnetA, RouteTableId: !Ref DataRouteTable }
+
+  DataSubnetBRouteAssoc:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties: { SubnetId: !Ref DataSubnetB, RouteTableId: !Ref DataRouteTable }
+
+Outputs:
+  VpcId:
+    Value: !Ref Vpc
+    Export: { Name: !Sub "${ProjectName}-VpcId" }
+  VpcCidr:
+    Value: !Ref VpcCidr
+    Export: { Name: !Sub "${ProjectName}-VpcCidr" }
+  PublicSubnetA:
+    Value: !Ref PublicSubnetA
+    Export: { Name: !Sub "${ProjectName}-PublicSubnetA" }
+  PublicSubnetB:
+    Value: !Ref PublicSubnetB
+    Export: { Name: !Sub "${ProjectName}-PublicSubnetB" }
+  AppSubnetA:
+    Value: !Ref AppSubnetA
+    Export: { Name: !Sub "${ProjectName}-AppSubnetA" }
+  AppSubnetB:
+    Value: !Ref AppSubnetB
+    Export: { Name: !Sub "${ProjectName}-AppSubnetB" }
+  DataSubnetA:
+    Value: !Ref DataSubnetA
+    Export: { Name: !Sub "${ProjectName}-DataSubnetA" }
+  DataSubnetB:
+    Value: !Ref DataSubnetB
+    Export: { Name: !Sub "${ProjectName}-DataSubnetB" }
