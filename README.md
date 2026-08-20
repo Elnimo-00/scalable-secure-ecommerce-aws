@@ -17,25 +17,7 @@ chayanulu varahabhatla, at the university of maryland.
 
 ## architecture
 
-```mermaid
-flowchart TD
-    user([user])
-    dns["Route 53"]
-    cf[["CloudFront + OAC"]]
-    s3[("S3 static assets")]
-    waf["AWS WAF"]
-    alb["ALB · HTTPS 443, HTTP→301"]
-    subgraph asg["Auto Scaling group · 2 AZs"]
-        e1["app server"]
-        e2["app server"]
-    end
-    rds[("RDS MySQL · Multi-AZ · KMS")]
-
-    user --> dns
-    dns -->|"/assets/*"| cf --> s3
-    dns -->|"app"| waf --> alb
-    alb --> e1 & e2 --> rds
-```
+![architecture diagram](docs/images/architecture.png)
 
 the full design, and how each part maps to a template, is in
 [`docs/architecture.md`](docs/architecture.md).
