@@ -1,0 +1,8 @@
+{
+  "ProjectName": "enpm818n-grp21",
+  "DomainName": "enpm818n-grp21.online",
+  "InstanceType": "t3.micro",
+  "DbInstanceClass": "db.t3.micro",
+  "AdminCidr": "203.0.113.0/24",
+  "AlertEmail": ""
+}
