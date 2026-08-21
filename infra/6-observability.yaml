@@ -1,7 +1,7 @@
 AWSTemplateFormatVersion: "2010-09-09"
 
 Description: >
-  Observability tier — a multi-region CloudTrail to an encrypted, access-blocked
+  Observability tier, a multi-region CloudTrail to an encrypted, access-blocked
   S3 bucket, a CloudWatch dashboard over the scaling and database metrics, and
   alarms for load-balancer 5xx errors and database CPU. Deploy last.
 

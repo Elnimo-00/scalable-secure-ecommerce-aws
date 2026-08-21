@@ -1,7 +1,7 @@
 AWSTemplateFormatVersion: "2010-09-09"
 
 Description: >
-  Data tier — an Amazon RDS MySQL instance in Multi-AZ, encrypted with the
+  Data tier, an Amazon RDS MySQL instance in Multi-AZ, encrypted with the
   workload KMS key, reachable only from the app tier, requiring TLS on every
   connection. Credentials come from the Secrets Manager secret created in the
   security stack. Deploy after the network and security stacks.

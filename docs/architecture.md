@@ -14,12 +14,12 @@ flowchart TD
     cf[["CloudFront + OAC"]]
     s3[("S3 static assets<br>private, encrypted")]
     waf["AWS WAF<br>managed rule groups"]
-    alb["Application Load Balancer<br>HTTPS 443 · HTTP 80 → 301"]
-    subgraph asg["Auto Scaling group · 2 AZs"]
+    alb["Application Load Balancer<br>HTTPS 443, HTTP 80 → 301"]
+    subgraph asg["Auto Scaling group, 2 AZs"]
         e1["app server"]
         e2["app server"]
     end
-    rds[("RDS MySQL · Multi-AZ<br>KMS-encrypted · TLS only")]
+    rds[("RDS MySQL, Multi-AZ<br>KMS-encrypted, TLS only")]
 
     user --> dns
     dns -->|"/assets/*"| cf
@@ -60,7 +60,7 @@ degrades capacity but does not take the site down.
 
 **Scaling.** The Auto Scaling group runs a target-tracking policy that holds
 average CPU at 50%, with a 300-second warm-up so a newly launched instance has
-time to register before it counts — exactly the configuration the report tuned to.
+time to register before it counts, exactly the configuration the report tuned to.
 Minimum 1, maximum 3.
 
 **Encryption everywhere.** A customer-managed KMS key encrypts the EBS volumes,
@@ -70,21 +70,21 @@ assets bucket is encrypted and blocks all public access.
 
 **Least privilege.** The app servers reach the database only on 3306, the
 database can be reached only from the app tier, and the app instances carry an
-IAM role scoped to read one secret and decrypt with one key — no static
+IAM role scoped to read one secret and decrypt with one key, no static
 credentials, and IMDSv2 is required.
 
 **Edge protection.** The WAF web ACL runs the managed rule groups from the report
-— IP reputation, common rule set, known bad inputs, SQLi and PHP — in front of
+- IP reputation, common rule set, known bad inputs, SQLi and PHP, in front of
 the load balancer. CloudFront reaches S3 through Origin Access Control, so the
 bucket is never public.
 
 ## differences from the deployed build
 
-This IaC is the report's architecture written as code — the report lists
+This IaC is the report's architecture written as code, the report lists
 "use CloudFormation or Terraform" as future work, and this is that. A few things
 are tightened relative to the screenshots: the deployed build placed the app in
 public subnets, whereas this puts the Auto Scaling group in private app subnets
 behind NAT; and the ACM certificate here is DNS-validated automatically in the
 hosted zone, which removes the manual CNAME step the report called out as a
-pain point. The templates are validated with cfn-lint but not deployed here —
+pain point. The templates are validated with cfn-lint but not deployed here -
 the report holds the real deployment and its measured results.

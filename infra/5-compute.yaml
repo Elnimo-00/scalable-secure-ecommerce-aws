@@ -1,7 +1,7 @@
 AWSTemplateFormatVersion: "2010-09-09"
 
 Description: >
-  Compute tier — a least-privilege instance role, a launch template that boots
+  Compute tier, a least-privilege instance role, a launch template that boots
   the e-commerce web server, an Auto Scaling group spread across two AZs behind
   the load balancer with a target-tracking policy on CPU, and a bastion host.
   Matches the report: min 1, max 3, target 50% CPU, 300s warm-up. Deploy after

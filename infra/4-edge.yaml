@@ -1,7 +1,7 @@
 AWSTemplateFormatVersion: "2010-09-09"
 
 Description: >
-  Edge tier — the public front door. Route 53 hosted zone and DNS-validated ACM
+  Edge tier, the public front door. Route 53 hosted zone and DNS-validated ACM
   certificate; the S3 static-assets bucket locked to CloudFront through Origin
   Access Control; the CloudFront distribution; and the Application Load Balancer
   with an HTTPS listener, an HTTP listener that redirects to it, and a rule that
@@ -22,7 +22,7 @@ Resources:
     Properties:
       Name: !Ref DomainName
 
-  # DNS-validated automatically in the hosted zone above — no manual CNAME.
+  # DNS-validated automatically in the hosted zone above, no manual CNAME.
   Certificate:
     Type: "AWS::CertificateManager::Certificate"
     Properties:

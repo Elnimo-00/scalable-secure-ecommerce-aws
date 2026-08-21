@@ -1,7 +1,7 @@
 AWSTemplateFormatVersion: "2010-09-09"
 
 Description: >
-  Network tier for the ENPM818N Group 21 e-commerce platform — a three-tier VPC
+  Network tier for the ENPM818N Group 21 e-commerce platform, a three-tier VPC
   across two Availability Zones. Public subnets hold the load balancer and
   bastion; the app subnets hold the Auto Scaling group; the data subnets hold
   RDS and have no route off the VPC. Deploy first; the other stacks import its
